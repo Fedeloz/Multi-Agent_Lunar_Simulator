@@ -1,0 +1,4 @@
+Method,Delivered,Duplicated,Dropped
+MA-DRL,17641.0,0.0,10188.0
+Spray_and_Wait,21419.0,5228.0,21137.0
+Greedy,23251.0,0.0,5394.0

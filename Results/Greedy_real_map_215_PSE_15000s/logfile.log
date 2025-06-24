@@ -1,0 +1,10 @@
+-----------------------------------
+Generating Lunar Surface with 3 rovers with buffer size: 300
+Map generated and saved:
+PNG: ./Results/Greedy_real_map_215_PSE_15000s/map/map_16.png
+Raw PNG: ./Results/Greedy_real_map_215_PSE_15000s/map/raw_map_16.png
+CSV: ./Results/Greedy_real_map_215_PSE_15000s/map/map_mc_16.csv
+-----------------------------------
+Generating trajectories and objectives with PSE planner
+Initializing Docker container with image: path-planner-image0.3
+Generating trajectories for 3 rovers...

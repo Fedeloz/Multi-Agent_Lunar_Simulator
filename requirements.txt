@@ -1,0 +1,8 @@
+#Python3.9.12
+networkx==3.2.1
+numpy==1.22.1
+pandas==2.0.0
+matplotlib==3.5.1
+docker==7.1.0
+tensorflow==2.13.0
+scikit-learn==1.1  
