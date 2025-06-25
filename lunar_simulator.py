@@ -80,7 +80,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0 = all logs, 1 = warnings, 2 = erro
 video_options = ['display', 'save', 'no video']
 video_option = video_options[1]
 buffer_size = 300               # rover buffer size
-num_rovers = 7                  # Number of rovers
+num_rovers = 3                  # Number of rovers
 max_neighbors = 2               # max number of neighbors to consider. The action space is max_neighbors+1, since 0 is hold
 HTL = False                     # If True, the hops to lander are included in the state space
 sim_duration = 5000             # in time steps
