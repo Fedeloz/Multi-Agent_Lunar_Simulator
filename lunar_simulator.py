@@ -97,8 +97,8 @@ traj_type = 2                   # [0,1,2] [0: Random objectives and A* policy fo
 map_type = 1                    # [0,1] 0: Random rocks, 1 realistic maps generated with lunar distribution
 comm_policy = 3                 # [0: 'greedy', 1: 'spray_wait', 2: 'MA-DRL', 3: 'GAT-RL']
 import_trajectories = False     # If True, the trjectories and goals are not generated, but read from a csv
-import_models = False           # If True, the models are not trained, but read from a folder. No exploration is done.
-explore_train = True            # If True, the models are trained with exploration. If False, the models are just exploiting.
+import_models = True           # If True, the models are not trained, but read from a folder. No exploration is done.
+explore_train = False            # If True, the models are trained with exploration. If False, the models are just exploiting.
 
 # --- General parameters ---
 # num_rovers = 10                  # Number of rovers
@@ -992,8 +992,8 @@ class RoverGATAgent:
 
         if models_local_path is not None:
             # Load pre-trained models
-            self.policy_net = torch.load(f"{models_local_path}/gat_policy_net.pt")
-            self.target_net = torch.load(f"{models_local_path}/gat_target_net.pt")
+            self.policy_net = torch.load(f"{models_local_path}/gat_policy_net.pt", weights_only=False)
+            self.target_net = torch.load(f"{models_local_path}/gat_target_net.pt", weights_only=False)
             self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=1e-3)
             print(f"Loaded GAT models from {models_local_path}")
         else:
@@ -1042,7 +1042,7 @@ class RoverGATAgent:
         node_list = graph.node_list
         num_actions = len(node_list)  # hold + all one-hop neighbors
     
-        if np.random.rand() < self.epsilon:
+        if explore_train and np.random.rand() < self.epsilon:
             return int(np.random.choice(num_actions))
         with torch.no_grad():
             q_values = self.policy_net(graph.x, graph.edge_index)[local_node_idx]
