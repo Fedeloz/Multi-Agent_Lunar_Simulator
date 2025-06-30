@@ -174,7 +174,7 @@ local_trajectories_folder = '/Trajectories_goals/'
 
 # --- Learning - General ---
 # import_models = True          # If True, the models are not trained, but read from a folder. No exploration is done.
-update_f = 200                 # frequency of target network update
+update_f = 250                 # frequency of target network update
 action_seed = 42                # Seed for random action selection
 models_local_path = './Models/' # Path to save the models
 
@@ -202,8 +202,8 @@ if HTL:
 # --- Learning - Rewards ---
 penalty_hold        = 0
 penalty_forward     = 0
-penalty_drop        = -1
-reward_deliver      = 1
+penalty_drop        = -10
+reward_deliver      = 10
 buffer_steppness    = 3     # Steepness of the exponential buffer penalty. If bigger the difference between a full and an empty buffer is bigger
 penalty_unavailable = -100
 
