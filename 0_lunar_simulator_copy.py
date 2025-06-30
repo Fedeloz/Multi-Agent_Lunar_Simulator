@@ -22,8 +22,7 @@ import re
 # PSE path planner: Python
 from sklearn.cluster import KMeans
 from scipy.optimize import linear_sum_assignment
-from scipy.ndimage import binary_dilation
-from skimage.morphology import disk
+
 
 # Learning framework
 from collections import deque
@@ -76,21 +75,19 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0 = all logs, 1 = warnings, 2 = erro
 
 # --- ToDo ---
 # Implement hot potato algorithm?
+
 # Last point and first point are connected on trajectories plot. Check how this was avoided in CADRE PSE stack. This happenned before and was because trajectories were looped.
 # We need to handle unreachable points (see gepeto)
 # Do not mark a radio of cells as explored if they are an obstacle
-# For spray and wait: When a rover has sent a set of packets to the another buddy, and this delivers them, the explored area turns intermitent instead of full green
-# Rovers do not send the packets to the lander when they are connected. 1. The action index is not properly mapped. 2. The state is not properly represented. 3. The training is not good enough.
 
-# they only choose themselves at some point, even when random actions are allowed
 
 # --- Hot Parameters ---
 # Parameters that are changed more usually
 video_options = ['display', 'save', 'no video']
-video_option = video_options[1]
+video_option = video_options[0]
 buffer_size = 300               # rover buffer size
 num_rovers = 3                  # Number of rovers
-max_neighbors = num_rovers      # max number of neighbors to consider. The action space is max_neighbors+1, since 0 is hold
+max_neighbors = 2               # max number of neighbors to consider. The action space is max_neighbors+1, since 0 is hold
 HTL = False                     # If True, the hops to lander are included in the state space
 sim_duration = 5000             # in time steps
 traj_type = 2                   # [0,1,2] [0: Random objectives and A* policy for trajectories, 1 objectives and trajectories generated with JPL's PSE code, 2: same as 1 but in a python script]
@@ -115,7 +112,6 @@ trajectories_local_path =       './Trajectories_goals/'
 grd_size = 200                  # Map size. PSE objective generator will not generate trajectories under 142x142
 paint_radius = 1                # Radius (in grid cells) around the rover to paint
 resolution = 0.05               # Resolution for the ground grid map
-obstacle_inflate_radius = 5     # Radius (in grid cells) to inflate obstacles for map division and planning
 
 # --- Exploration parameters ---
 frontier_radius = 10
@@ -174,38 +170,33 @@ local_trajectories_folder = '/Trajectories_goals/'
 
 # --- Learning - General ---
 # import_models = True          # If True, the models are not trained, but read from a folder. No exploration is done.
-update_f = 200                 # frequency of target network update
+update_f = 1000                 # frequency of target network update
 action_seed = 42                # Seed for random action selection
 models_local_path = './Models/' # Path to save the models
 
 # --- Learning - State space ---
 # max_neighbors = 3   # max number of neighbors to consider. The action space is max_neighbors+1, since 0 is hold
-current_node = 0        # Value for the current node in the state space
-is_lander = 0           # Value for the lander node
-connected = 0           # Connected to lander. In Lander class this is 0
-not_current_node = 1    # Value for not the current node in the state space
-not_lander = 1          # Value for any node but the lander
-unconnected = 1         # Not connected to lander
-max_buffer = 1          # Max buffer size normalized
-no_ttl = 100            # No TTL value # FIXME this is is an arbitrary value. compute the max possible ttl for the current map?
-ttl_norm = 100          # TTL value divided by this number to normalize it
-
 state_size_node = 3 # State size per node
+connected = 10      # Connected to lander. In Lander class this is 0
+unconnected = 50    # Not connected to lander
 pos_norm = 50       # Normalize position [0, pos_norm]
 distance_norm = 50  # Normalized max distance to lander
+ttl_norm = 1        # TTL value divided by this number to normalize it
+no_ttl = 100         # No TTL value # FIXME this is is an arbitrary value. compute the max possible ttl for the current map?
 hops_to_lander = 50 # Max hops to lander represented
+max_buffer = 50     # Max buffer size normalized
 unavailable = 100   # Value for unavailable neighbors
 # HTL = True          # If True, the hops to lander are included in the state space
 if HTL:
     state_size_node += 1 # Add hops to lander to the state size
 
 # --- Learning - Rewards ---
+penalty_unavailable = -100
 penalty_hold        = 0
 penalty_forward     = 0
-penalty_drop        = -1
-reward_deliver      = 1
+penalty_drop        = -50
+reward_deliver      = 100
 buffer_steppness    = 3     # Steepness of the exponential buffer penalty. If bigger the difference between a full and an empty buffer is bigger
-penalty_unavailable = -100
 
 # --- Option for video generation ---
 # video_options = ['display', 'save', 'no video']
@@ -546,33 +537,18 @@ def plot_final_trajectories_contrast(surface, output_dir='.'):
 # Rover exploration
 # =============================================================================
 
-def divide_map(surface, output_dir=outputPath, obstacle_inflate_radius=obstacle_inflate_radius):
+def divide_map(surface, output_dir=outputPath):
     """
     Divide the unexplored map among rovers using K-means clustering and Hungarian assignment.
     - Clusters unexplored, rock-free cells into num_rovers regions.
     - Assigns each region to the closest rover using the Hungarian algorithm.
     - Each rover stores its assigned area (list of (row, col) grid cells) in rover.assigned_area.
-    - Inflates obstacles by `obstacle_inflate_radius` cells for each rover, so they avoid planning near obstacles.
     - Plots the resulting region assignments and rover positions.
     - Saves the plot to 'map/map_division.png' in the output directory.
     """
+    print(f'Dividing map into {num_rovers} exploration areas')
 
-    def inflate_obstacles(rocks, radius):
-        """
-        Inflate obstacles by `radius` cells in all directions (circular/disk expansion).
-        Returns a new binary obstacle map.
-        """
-        structure = disk(radius)
-        inflated = binary_dilation(rocks, structure=structure)
-        return inflated.astype(int)
-
-    print(f'Dividing map into {num_rovers} exploration areas (obstacle inflation: {obstacle_inflate_radius} cells, {obstacle_inflate_radius*resolution*100:.2f} cm)')
-
-    # Inflate obstacles for clustering (global, for region assignment)
-    inflated_rocks = inflate_obstacles(surface.rocks, obstacle_inflate_radius)
-    # Store the global inflated map in the surface for later use
-    surface.inflated_rocks_global = inflated_rocks.copy()
-    unexplored = np.argwhere((surface.ground == 0) & (inflated_rocks == 0))
+    unexplored = np.argwhere((surface.ground == 0) & (surface.rocks == 0))
     if len(unexplored) < num_rovers:
         print("Not enough unexplored cells to assign to all rovers.")
         return None
@@ -600,11 +576,9 @@ def divide_map(surface, output_dir=outputPath, obstacle_inflate_radius=obstacle_
         # Store assigned area in rover
         surface.rovers[rover_id].assigned_area.append(tuple(cell))
 
-    # Attach a per-rover boolean region mask and per-rover inflated obstacle map
+    # Attach a per-rover boolean region mask
     for i, rover in enumerate(surface.rovers):
         rover.region_map = (region_map == i)
-        # Each rover gets its own inflated obstacle map for planning
-        rover.inflated_rocks = inflated_rocks.copy()
 
     # 4. Plot with same style as trajectory map
     plt.figure(figsize=(10, 10))
@@ -623,11 +597,22 @@ def divide_map(surface, output_dir=outputPath, obstacle_inflate_radius=obstacle_
     plt.imshow(obstacle_map, cmap="gray_r", origin="lower", extent=extent)
 
     # Region overlay (transparent)
+    # cmap = plt.get_cmap("tab10", num_rovers)
+
+    # Use matplotlib's default property cycle to match plot_final_trajectories
     prop_cycle = plt.rcParams['axes.prop_cycle']
     colors = prop_cycle.by_key()['color']
     cmap = ListedColormap(colors[:num_rovers])
     region_img = np.ma.masked_where(region_map == -1, region_map)
     plt.imshow(region_img, cmap=cmap, origin="lower", extent=extent, alpha=0.5)
+
+    # Rover positions
+    # for i, rover in enumerate(surface.rovers):
+    #     r, c = surface.pos_to_cell(rover.position)
+    #     x = c * resolution + map_origin
+    #     y = r * resolution + map_origin
+    #     plt.plot(x, y, 'o', color=cmap(i), label=f"Rover {i+1}", markersize=10)
+
     plt.xlabel("x [m]")
     plt.ylabel("y [m]")
     plt.title("Exploration Region Assignment")
@@ -678,8 +663,8 @@ def run_exploration(surface, obs_radius=frontier_radius, output_dir='.'):
         gx = (target[1] + 0.5) / grd_size
         gy = (target[0] + 0.5) / grd_size
         r.timed_goals.append((0, gx, gy))
-        # compute the full A* path into the region using the global inflated obstacle map
-        path = r.astar(surface.inflated_rocks_global, start, target)
+        # compute the full A* path into the region
+        path = r.astar(surface.rocks, start, target)
         r._path_cells = path[1:] if len(path) > 1 else []
 
     # 4) initialize per-rover known maps
@@ -728,8 +713,8 @@ def run_exploration(surface, obs_radius=frontier_radius, output_dir='.'):
                 gx = (goal[1] + 0.5) / grd_size
                 gy = (goal[0] + 0.5) / grd_size
                 r.timed_goals.append((t, gx, gy))
-                # plan full A* path to it using the global inflated obstacle map
-                full = r.astar(surface.inflated_rocks_global, curr, goal)
+                # plan full A* path to it
+                full = r.astar(surface.rocks, curr, goal)
                 r._path_cells = full[1:] if len(full) > 1 else []
 
             # if path exists, take one step along it
@@ -998,39 +983,39 @@ class RoverGATAgent:
             print(f"Loaded GAT models from {models_local_path}")
         else:
             # Create new models
-            self.policy_net = GATPolicy(4, action_size)  # 4 features: buffer_normalized, connected, ttl, is_lander_
-            self.target_net = GATPolicy(4, action_size)
+            self.policy_net = GATPolicy(3, action_size)  # 3 features: buffer_normalized, connected, ttl
+            self.target_net = GATPolicy(3, action_size)
             self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=1e-3)
             self.update_target()
 
     def update_target(self):
         self.target_net.load_state_dict(self.policy_net.state_dict())
     
-    def observe_state_GAT(self, node):
+    def observe_state(self, node):
         """
         Builds the local subgraph (1-hop neighborhood) for the given node.
         Returns (local_graph, local_node_idx, node_list).
-        Uses node.local_neighbors to get directly connected neighbors.
         """
         # 1. Get 1-hop neighbors (including self)
-        node_list = [node.id] + list(node.local_neighbors)
+        neighbors = [node.id] + [n for n in node.local_neighbors if n != node.id]
+        subgraph = self.surface.G_feasible.subgraph(neighbors)
+        node_list = list(subgraph.nodes())
+        # Ensure self.id is first
+        if node_list[0] != node.id:
+            node_list.remove(node.id)
+            node_list = [node.id] + node_list
         node_id_to_local = {nid: i for i, nid in enumerate(node_list)}
         # 2. Build node features
         node_features = []
         for nid in node_list:
             n = self.surface.get_node_by_id(nid)
-            is_lander_ = is_lander if nid == 0 else not_lander
-            is_current = current_node if nid == node.id else not_current_node
-            # node_features.append([n.buffer_normalized, n.connected, n.ttl, is_lander_])
-            node_features.append([is_current, is_lander_, n.connected, n.buffer_normalized])
+            node_features.append([n.buffer_normalized, n.connected, n.ttl])
         x = torch.tensor(node_features, dtype=torch.float)
         # 3. Build edge index (remap to local indices)
-        edge_index_list = []
-        for u in node_list:
-            for v in node_list:
-                if u != v and v in self.surface.get_node_by_id(u).local_neighbors:
-                    edge_index_list.append([node_id_to_local[u], node_id_to_local[v]])
-        edge_index = torch.tensor(edge_index_list, dtype=torch.long).t().contiguous()
+        edge_index = torch.tensor(
+            [[node_id_to_local[u], node_id_to_local[v]] for u, v in subgraph.edges()],
+            dtype=torch.long
+        ).t().contiguous()
         if edge_index.numel() == 0:
             edge_index = torch.empty((2,0), dtype=torch.long)
         local_node_idx = 0  # self is always first
@@ -1039,76 +1024,70 @@ class RoverGATAgent:
         return local_graph, local_node_idx, node_list
     
     def get_action(self, graph, local_node_idx):
-        node_list = graph.node_list
-        num_actions = len(node_list)  # hold + all one-hop neighbors
-    
+        # if isinstance(graph, tuple):
+        #     graph = graph[0]
+        # num_actions = graph.x.shape[0]  # action space = #nodes in subgraph (self + neighbors)
+        if isinstance(graph, tuple):
+            graph = graph[0]
+        num_actions = graph.x.shape[0]
         if np.random.rand() < self.epsilon:
-            return int(np.random.choice(num_actions))
+            return np.random.randint(num_actions)
         with torch.no_grad():
-            q_values = self.policy_net(graph.x, graph.edge_index)[local_node_idx]
-            return int(torch.argmax(q_values[:num_actions]).item())
+            q_values = self.policy_net(graph.x, graph.edge_index)
+            return int(torch.argmax(q_values[local_node_idx][:num_actions]).item())
 
-    def store_experience(self, graph, node_idx, action, reward, next_graph, done):
-        # Directly store the local action index
-        self.replay.store((graph, node_idx), action, reward, (next_graph, 0), done)
+    # def store_experience(self, graph, local_node_idx, action_index, reward, next_graph, done):
+    #     # Store action index, not node id
+    #     self.replay.store((graph, local_node_idx), action_index, reward, (next_graph, local_node_idx), done)
+
+    def store_experience(self, graph, local_node_idx, action_index, reward, next_graph, done):
+        if isinstance(graph, tuple):
+            graph = graph[0]
+        if isinstance(next_graph, tuple):
+            next_graph = next_graph[0]
+        self.replay.store((graph, local_node_idx), action_index, reward, (next_graph, local_node_idx), done)
 
     def train(self):
         if len(self.replay) < self.batch_size:
             return
-
+        # if isinstance(graph, tuple):
+        #     graph = graph[0]
         batch = random.sample(self.replay.buffer, self.batch_size)
-
-        q_values, actions, next_q_values, rewards, dones = [], [], [], [], []
-
-        for (graph, local_idx), action_idx, reward, (next_graph, next_local_idx), done in batch:
-            q_pred = self.policy_net(graph.x, graph.edge_index)[local_idx]
-            num_actions = q_pred.size(0)
-
-            # Skip invalid actions
-            if action_idx >= num_actions:
-                continue
-
-            q_next = self.target_net(next_graph.x, next_graph.edge_index)[next_local_idx]
-
-            q_values.append(q_pred)
-            actions.append(action_idx)
-            next_q_values.append(q_next)
-            rewards.append(reward)
-            dones.append(done)
-
-        # If no valid samples, exit early
-        if len(q_values) == 0:
-            return
-
-        # Convert lists to tensors
+        states, actions, rewards, next_states, dones = zip(*batch)
+        graphs, local_node_idxs = zip(*states)
+        next_graphs, next_local_node_idxs = zip(*next_states)
+    
+        q_values = []
+        next_q_values = []
+        for g, idx in zip(graphs, local_node_idxs):
+            q_values.append(self.policy_net(g.x, g.edge_index)[idx])
+        for ng, idx in zip(next_graphs, next_local_node_idxs):
+            next_q_values.append(self.target_net(ng.x, ng.edge_index)[idx])
+    
         q_values = torch.stack(q_values)
         next_q_values = torch.stack(next_q_values)
         actions = torch.tensor(actions, dtype=torch.long)
         rewards = torch.tensor(rewards, dtype=torch.float)
         dones = torch.tensor(dones, dtype=torch.float)
-
-        # Compute loss
+    
+        # Clamp actions to valid range
+        actions = actions.clamp(0, q_values.shape[1] - 1)
+    
         q_pred = q_values.gather(1, actions.unsqueeze(1)).squeeze()
         q_next_max = next_q_values.max(1)[0]
         q_target = rewards + self.gamma * q_next_max * (1 - dones)
-
+    
         loss = F.mse_loss(q_pred, q_target.detach())
-
-        # Backpropagation
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-
-        # Epsilon decay
+    
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
-
-        # Periodically update target network
+    
         self.train_step += 1
-        if self.train_step % update_f == 0:
+        if self.train_step % 1000 == 0:
             self.update_target()
-            print(f"Updated target network at step {self.train_step}, epsilon: {self.epsilon:.4f}")
-
 
 # GATPolicy as before
 class GATPolicy(torch.nn.Module):
@@ -1198,10 +1177,7 @@ class Lander:
 
     def update_direct_neighbors_lander(self):
         self.local_neighbors = list(self.G_local.neighbors(self.id))
-    
-    def is_buffer_full(self):
-       return False
-    
+
 # =============================================================================
 # Rover Class
 # =============================================================================
@@ -1384,23 +1360,30 @@ class Rover:
     def make_action(self, action_idx, neighbors):
         """
         Executes the chosen action on packets:
-        - 0 = hold: Keep packets in the current rover's buffer.
-        - 1..len(neighbors) = forward to neighbors[action_idx-1]: Forward packets to the selected neighbor.
-        Sends as many packets as possible to the chosen destination, limited by tx_rate_indirect or tx_rate_direct.
+        - For DDQN (comm_policy==2): 0 = hold, 1..N = neighbors[action_idx-1]
+        - For GAT  (comm_policy==3): 0 = hold (self), 1..N = neighbors[action_idx]
         """
+        comm_policy = self.surface.comm_policy
+
         # HOLD
         if action_idx == 0:
             # No action needed, packets remain in the current rover's buffer
             return
 
-        # Map action index to neighbor ID
-        nbr_i = action_idx - 1
-        if nbr_i < 0 or nbr_i >= len(neighbors):
-            # Invalid index → treat as hold
-            print(f'invalid action index: {action_idx} for rover {self.id}')
-            return
+        # --- DDQN: action_idx-1 maps to neighbors ---
+        if comm_policy == 2:
+            nbr_i = action_idx - 1
+            if nbr_i < 0 or nbr_i >= len(neighbors):
+                print(f'invalid action index: {action_idx} for rover {self.id}')
+                return
+            dest_id = neighbors[nbr_i].id
 
-        dest_id = neighbors[nbr_i].id
+        # --- GAT: action_idx maps directly to neighbors (node_list) ---
+        elif comm_policy == 3:
+            if action_idx < 0 or action_idx >= len(neighbors):
+                print(f'invalid action index: {action_idx} for rover {self.id}')
+                return
+            dest_id = neighbors[action_idx].id
 
         # DELIVER TO LANDER
         if dest_id == 0:
@@ -1438,7 +1421,6 @@ class Rover:
         """
         comm_policy = self.surface.comm_policy
         neighbors = self.sorted_neighbors
-        done = False
 
         # DDQNAgent
         if comm_policy == 2:
@@ -1463,7 +1445,6 @@ class Rover:
                 elif self.last_action_destination.id == 0:
                     next_state = self.last_action_destination.current_state
                     reward = reward_deliver
-                    done = True
                 
                 # Last time forwarded packets
                 else:
@@ -1472,9 +1453,16 @@ class Rover:
 
                 # Store experience
                 if comm_policy == 3:
-                    agent.store_experience(self.last_state, 0, self.last_action, reward, next_state, done=done)
+                    agent.store_experience(
+                        self.last_state[0],  # local_graph
+                        self.last_state[1],  # local_node_idx
+                        self.last_action,
+                        reward,
+                        next_state[0],       # next local_graph
+                        done=False
+                    )
                 elif comm_policy == 2:
-                    agent.store_experience(self.last_state, self.last_action, reward, next_state, done=done)
+                    agent.store_experience(self.last_state, self.last_action, reward, next_state, done=False)
                 self.rewards.append((reward, self.surface.sim_time))
 
         #--------------------------------------------
@@ -1487,12 +1475,11 @@ class Rover:
             next_node = self if action_index==0 else neighbors[action_index - 1]  # Get the neighbor object or self for hold action
             self.make_action(action_index, neighbors)
         elif comm_policy == 3:
-            local_graph = self.current_state
-            node_list = local_graph.node_list
-            action_index = agent.get_action(local_graph, 0)
-            neighbors = [self.surface.get_node_by_id(nid) for nid in node_list[1:]]
-            next_node = self if action_index == 0 else neighbors[action_index - 1]
-            self.make_action(action_index, neighbors)
+            local_graph, local_node_idx, node_list = self.current_state
+            action_index = agent.get_action(local_graph, local_node_idx)
+            next_node_id = node_list[action_index]
+            next_node = self.surface.get_node_by_id(next_node_id)
+            self.make_action(action_index, [self.surface.get_node_by_id(nid) for nid in node_list])
 
         # Train the agent
         if explore_train:
@@ -1847,6 +1834,7 @@ class Rover:
         normalized_usage = usage_ratio * max_buffer
         self.buffer_normalized = normalized_usage
     
+    # For Spray and Wait
     def is_buffer_full(self):
         """
         True if combined size of active+inactive buffers is >= buffer_size.
@@ -1969,7 +1957,7 @@ class LunarSurface:
         
         elif comm_policy == 3:
             self.GATAgent = RoverGATAgent(self)
-            self.lander_obj.current_state, self.lander_obj.sorted_neighbors, self.lander_obj.node_list = self.GATAgent.observe_state_GAT(self.lander_obj) # Current state of the lander
+            self.lander_obj.current_state, self.lander_obj.sorted_neighbors, self.lander_obj.node_list = self.GATAgent.observe_state(self.lander_obj) # Current state of the lander
             
             if import_models:
                 self.GATAgent = RoverGATAgent(self, models_local_path=models_local_path)
@@ -1979,6 +1967,7 @@ class LunarSurface:
                 self.GATAgent = RoverGATAgent(self)
                 print('-----------------------------------')
                 print(f'Graph Attention Network created!')
+
 
     def check_finished_rovers(self):
         all_finished = True
@@ -2406,7 +2395,7 @@ class LunarSurface:
             if comm_policy == 2:
                 self.lander_obj.current_state, self.lander_obj.sorted_neighbors = self.DDQNAgent.observe_state(self.lander_obj)   # Update surface state
             elif comm_policy == 3:
-                self.lander_obj.current_state, self.lander_obj.sorted_neighbors, self.lander_obj.node_list = self.GATAgent.observe_state_GAT(self.lander_obj)   # Update surface state GAT  
+                self.lander_obj.current_state, self.lander_obj.sorted_neighbors, self.lander_obj.node_list = self.GATAgent.observe_state(self.lander_obj)   # Update surface state GAT  
             
             for rover in self.rovers:        
                 rover.last_state = rover.current_state                                      # Update rovers status
@@ -2423,7 +2412,7 @@ class LunarSurface:
                 rover.current_state, rover.sorted_neighbors = self.DDQNAgent.observe_state(rover)
         if comm_policy == 3:
             for rover in self.rovers:                                                       # Update rovers state GAT
-                rover.current_state, rover.sorted_neighbors, rover.node_list = self.GATAgent.observe_state_GAT(rover)
+                rover.current_state, rover.sorted_neighbors, rover.node_list = self.GATAgent.observe_state(rover)
 
         for rover in self.rovers:
             rover.update_load()
