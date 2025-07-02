@@ -35,6 +35,7 @@ from tensorflow.keras.optimizers import Adam
 
 # Learning framework GNN
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_geometric.nn import GATConv
@@ -76,20 +77,18 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0 = all logs, 1 = warnings, 2 = erro
 
 # --- ToDo ---
 # Implement hot potato algorithm?
-# Last point and first point are connected on trajectories plot. Check how this was avoided in CADRE PSE stack. This happenned before and was because trajectories were looped.
-# We need to handle unreachable points (see gepeto)
-# Do not mark a radio of cells as explored if they are an obstacle
 # For spray and wait: When a rover has sent a set of packets to the another buddy, and this delivers them, the explored area turns intermitent instead of full green
 # Rovers do not send the packets to the lander when they are connected. 1. The action index is not properly mapped. 2. The state is not properly represented. 3. The training is not good enough.
 
-# they only choose themselves at some point, even when random actions are allowed
+# for spray and wait compute rho not with the spray factor but with the actual number of duplicated packets
+# I saw a rover sending 2 packets, wtf??
 
 # --- Hot Parameters ---
 # Parameters that are changed more usually
 video_options = ['display', 'save', 'no video']
 video_option = video_options[1]
 buffer_size = 300               # rover buffer size
-num_rovers = 3                  # Number of rovers
+num_rovers = 5                  # Number of rovers
 max_neighbors = num_rovers      # max number of neighbors to consider. The action space is max_neighbors+1, since 0 is hold
 HTL = False                     # If True, the hops to lander are included in the state space
 sim_duration = 5000             # in time steps
@@ -174,17 +173,19 @@ local_trajectories_folder = '/Trajectories_goals/'
 
 # --- Learning - General ---
 # import_models = True          # If True, the models are not trained, but read from a folder. No exploration is done.
-update_f = 250                 # frequency of target network update
+update_f = 250                  # frequency of target network update
 action_seed = 42                # Seed for random action selection
 models_local_path = './Models/' # Path to save the models
+gamma = 0.8                     # Discount factor for future rewards
+max_epsilon = 0.99              # Maximum epsilon value for exploration
 
 # --- Learning - State space ---
 # max_neighbors = 3   # max number of neighbors to consider. The action space is max_neighbors+1, since 0 is hold
 current_node = 0        # Value for the current node in the state space
-is_lander = 0           # Value for the lander node
+is_lander = 1           # Value for the lander node
 connected = 0           # Connected to lander. In Lander class this is 0
 not_current_node = 1    # Value for not the current node in the state space
-not_lander = 1          # Value for any node but the lander
+not_lander = 0          # Value for any node but the lander
 unconnected = 1         # Not connected to lander
 max_buffer = 1          # Max buffer size normalized
 no_ttl = 100            # No TTL value # FIXME this is is an arbitrary value. compute the max possible ttl for the current map?
@@ -200,11 +201,11 @@ if HTL:
     state_size_node += 1 # Add hops to lander to the state size
 
 # --- Learning - Rewards ---
+penalty_drop        = -50
+reward_deliver      = 50
 penalty_hold        = 0
 penalty_forward     = 0
-penalty_drop        = -10
-reward_deliver      = 10
-buffer_steppness    = 3     # Steepness of the exponential buffer penalty. If bigger the difference between a full and an empty buffer is bigger
+buffer_steppness    = 1     # Steepness of the exponential buffer penalty. If bigger the difference between a full and an empty buffer is bigger
 penalty_unavailable = -100
 
 # --- Option for video generation ---
@@ -780,6 +781,7 @@ def run_exploration(surface, obs_radius=frontier_radius, output_dir='.'):
 class ExperienceReplay:
     def __init__(self, maxlen=10000):
         self.buffer = deque(maxlen=maxlen)
+        print(f"Experience Replay initialized with maxlen={maxlen}.")
 
     def store(self, state, action, reward, next_state, done):
         self.buffer.append((state, action, reward, next_state, done))
@@ -797,7 +799,7 @@ class ExperienceReplay:
         return len(self.buffer)
 
 class RoverDDQNAgent:
-    def __init__(self, surface, state_size=state_size_node*(max_neighbors+1), action_size=max_neighbors+1, gamma=0.99, epsilon=0.99,
+    def __init__(self, surface, state_size=state_size_node*(max_neighbors+1), action_size=max_neighbors+1, gamma=gamma, epsilon=max_epsilon,
                  epsilon_min=0.01, epsilon_decay=0.9995, buffer_size=256, batch_size=32, ddqn=True, action_seed=action_seed):
         self.surface = surface
         self.state_size = state_size
@@ -979,7 +981,7 @@ def buffer_penalty(node, alpha=buffer_steppness):
 # =============================================================================
 
 class RoverGATAgent:
-    def __init__(self, surface, action_size=max_neighbors+1, gamma=0.99, epsilon=0.99, epsilon_min=0.01, epsilon_decay=0.9995, buffer_size=10000, batch_size=32, models_local_path=None):
+    def __init__(self, surface, action_size=max_neighbors+1, gamma=gamma, epsilon=max_epsilon, epsilon_min=0.01, epsilon_decay=0.9995, buffer_size=10000, batch_size=32, models_local_path=None):
         self.surface = surface
         self.action_size = action_size  # max_neighbors + 1 (hold + neighbors)
         self.gamma = gamma
@@ -1110,16 +1112,18 @@ class RoverGATAgent:
             print(f"Updated target network at step {self.train_step}, epsilon: {self.epsilon:.4f}")
 
 
-# GATPolicy as before
+# GATPolicy
 class GATPolicy(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, heads=2):
+    def __init__(self, in_channels, out_channels, heads=4):
         super().__init__()
         self.gat1 = GATConv(in_channels, 32, heads=heads)
-        self.gat2 = GATConv(32 * heads, out_channels, heads=1, concat=False)
+        self.gat2 = GATConv(32 * heads, 32, heads=1, concat=False)
+        self.fc = torch.nn.Linear(32, out_channels)  # Fully connected layer
 
     def forward(self, x, edge_index):
         x = F.relu(self.gat1(x, edge_index))
-        x = self.gat2(x, edge_index)
+        x = F.relu(self.gat2(x, edge_index))
+        x = self.fc(x)
         return x  # shape: [num_nodes, action_size]
     
 
@@ -1211,6 +1215,7 @@ class Rover:
         Initialize a rover with a given ID, starting position, and reference to the LunarSurface.
         Also initializes local buffers, outgoing queues, a packet counter, and a color.
         """
+        print(f"Initializing Rover {rover_id} at position {initial_position}.")
         self.id = rover_id
         self.position = np.array(initial_position)
         self.surface = surface
@@ -1689,6 +1694,7 @@ class Rover:
         packet_id = f"{self.id}_{self.packet_counter}"
         self.packet_counter += 1
         packet = Packet(packet_id, self.id, self.position, size, self.surface.sim_time, objective, L=self.L)
+        self.surface.all_packets_created.append(packet)
         if (self.get_buffer_use()) >= buffer_size:
             self.drop_first()
             self.dropped_packet = True
@@ -1899,6 +1905,7 @@ class Rover:
                 # Create new copy for neighbor
                 new_packet = copy.deepcopy(packet)
                 new_packet.copy_counter = half
+                self.surface.all_packets_created.append(new_packet)
 
                 # Send the new copy
                 neighbor.receive_packet(new_packet)
@@ -1916,6 +1923,7 @@ class Rover:
 # =============================================================================
 # LunarSurface Class
 # =============================================================================
+
 class LunarSurface:
     def __init__(self, grd_size, paint_radius, comm_policy):
         """
@@ -1945,6 +1953,7 @@ class LunarSurface:
         self.movement_rng = np.random.default_rng(movement_seed)
         self.lander_obj = Lander(self.lander, self)
         self.finished = False
+        self.all_packets_created = []  # Track all Packet objects ever created
 
         if import_trajectories:
             print('-----------------------------------')
@@ -1990,39 +1999,93 @@ class LunarSurface:
             self.finished = True
         return True
 
-    def compute_network_load_rho(self):
+    def compute_network_load_rho(self, use_actual_packets=True):
         """
         Computes average network load (rho) from simulation logs.
+        If use_actual_packets is True, uses the actual number of packets generated (and copies if comm_policy==1).
+        Otherwise, uses the analytical estimation as before.
         Returns:
             rho_unique: Load based on unique packet generation
             rho_spray:  Load including spray copies (only if comm_policy==1)
         """
-        lambda_unique = num_rovers / packet_generation_flow  # unique packets per time unit
-
+        if not use_actual_packets:
+            # Analytical estimation
+            lambda_unique = num_rovers / packet_generation_flow  # unique packets per time unit
+    
+            # Average number of rovers connected to the lander
+            connected_time = sum(
+                sum(1 for status, _ in rover.connecteds if status == connected)
+                for rover in self.rovers
+            )
+            A_avg = connected_time / sim_duration
+            mu_total = A_avg * tx_rate_direct  # mu = avg connected rovers * tx_rate_direct
+    
+            # Load using only unique packets
+            rho_unique = lambda_unique / mu_total if mu_total > 0 else float('inf')
+    
+            if comm_policy == 1:  # Spray and Wait
+                total_copies = sum(r.copies for r in self.rovers)
+                total_originals = num_rovers * (sim_duration / packet_generation_flow)
+                spray_factor = 1 + (total_copies / total_originals) if total_originals > 0 else 1
+                lambda_spray = lambda_unique * spray_factor
+                rho_spray = lambda_spray / mu_total if mu_total > 0 else float('inf')
+                print(f"Analytical estimation:")
+                print(f"  Unique packets generated: {int(total_originals)}")
+                print(f"  Total number of copies (excluding originals): {int(total_copies)}")
+                print(f"  Total packets (unique + copies): {int(total_originals + total_copies)}")
+                print(f"  Average connected rovers (A_avg): {A_avg:.2f}")
+                print(f"  mu (service rate, mu_total = A_avg * tx_rate_direct): {mu_total:.2f}")
+                print(f"  lambda (unique packet arrival rate): {lambda_unique:.4f}")
+                print(f"  lambda_spray (total packet arrival rate incl. copies): {lambda_spray:.4f}")
+                return rho_unique, rho_spray
+            else:
+                print(f"Analytical estimation:")
+                print(f"  Unique packets generated: {int(num_rovers * (sim_duration / packet_generation_flow))}")
+                print(f"  Average connected rovers (A_avg): {A_avg:.2f}")
+                print(f"  mu (service rate, mu_total = A_avg * tx_rate_direct): {mu_total:.2f}")
+                print(f"  lambda (unique packet arrival rate): {lambda_unique:.4f}")
+                return rho_unique, rho_unique
+    
+        # --- Use actual packets generated (and copies) ---
+        # You must have self.all_packets_created = [] in __init__ and append every Packet/copy to it!
+        if not hasattr(self, "all_packets_created"):
+            print("Warning: self.all_packets_created not found. Please track all created packets for accurate statistics.")
+            self.all_packets_created = []
+    
+        # Unique packets (by id)
+        unique_packet_ids = set(pkt.id for pkt in self.all_packets_created)
+        total_unique_packets = len(unique_packet_ids)
+        # All packets (including all copies)
+        total_packets_with_copies = len(self.all_packets_created)
+    
         # Average number of rovers connected to the lander
-        connected_time = 0
-        for rover in self.rovers:
-            rover_connected_time = sum(1 for status, _ in rover.connecteds if status == connected)
-            connected_time += rover_connected_time
-
+        connected_time = sum(
+            sum(1 for status, _ in rover.connecteds if status == connected)
+            for rover in self.rovers
+        )
         A_avg = connected_time / sim_duration
-        mu_total = A_avg * tx_rate_direct
-
-        # Load using only unique packets
+        mu_total = A_avg * tx_rate_direct  # mu = avg connected rovers * tx_rate_direct
+    
+        lambda_unique = total_unique_packets / sim_duration if sim_duration > 0 else 0
+        lambda_spray = total_packets_with_copies / sim_duration if sim_duration > 0 else 0
+    
         rho_unique = lambda_unique / mu_total if mu_total > 0 else float('inf')
-
-        if comm_policy == 1:  # Spray and Wait
-            total_copies = sum(r.copies for r in self.rovers)
-            total_originals = num_rovers * (sim_duration / packet_generation_flow)
-            spray_factor = 1 + (total_copies / total_originals) if total_originals > 0 else 1
-            lambda_spray = lambda_unique * spray_factor
-            rho_spray = lambda_spray / mu_total if mu_total > 0 else float('inf')
-            return rho_unique, rho_spray
-
-        else:
-            # For other policies, rho = rho_unique
-            return rho_unique, rho_unique
-
+        rho_spray = lambda_spray / mu_total if mu_total > 0 else float('inf')
+    
+        # Count unique packets delivered to lander
+        delivered_unique_ids = set(pkt.id for pkt in self.lander_obj.processed_buffer)
+        delivered_total = len(delivered_unique_ids)
+    
+        print(f"Simulation statistics:")
+        print(f"  Unique packets generated: {total_unique_packets}")
+        print(f"  Total packets (unique + copies): {total_packets_with_copies}")
+        print(f"  Unique packets delivered to lander: {delivered_total}")
+        print(f"  Average connected rovers (A_avg): {A_avg:.2f}")
+        print(f"  mu (service rate, mu_total = A_avg * tx_rate_direct): {mu_total:.2f}")
+        print(f"  lambda (unique packet arrival rate): {lambda_unique:.4f}")
+        print(f"  lambda_spray (total packet arrival rate incl. copies): {lambda_spray:.4f}")
+        return rho_unique, rho_spray
+    
     def save_models(self, outputPath):
         """
         Save the main DDQN or GAT models depending on the communication policy.
@@ -2195,6 +2258,7 @@ class LunarSurface:
 
         for pkt in self.lander_obj.buffer:
             if pkt.id in processed_ids or pkt.id in duplicated_ids:
+                pkt.duplicated_time = self.sim_time
                 self.lander_obj.duplicatedBuffer.append(pkt)
             else:
                 # Mark area around origin as explored (green)
@@ -2960,8 +3024,6 @@ class LunarSurface:
         plt.savefig(f"{outputPathFigures}/4_congestion_buffer_usage.png", dpi=500)
         plt.close()
 
-
-
         # ----------------------------
         # Plot 5: Effective Delivered, Dropped, and Duplicated Packets Over Time
         # ----------------------------
@@ -2969,6 +3031,7 @@ class LunarSurface:
         delivered_over_time = np.zeros(max_time)
         dropped_over_time = np.zeros(max_time)
         duplicated_over_time = np.zeros(max_time)
+        print(f'Duplicated packets: {len(self.lander_obj.duplicatedBuffer)}')
 
         for pkt in self.lander_obj.processed_buffer:
             if pkt.delivered_to_lander_time is not None:
@@ -2977,8 +3040,11 @@ class LunarSurface:
                     delivered_over_time[t] += 1
 
         for pkt in self.lander_obj.duplicatedBuffer:
-            if pkt.delivered_to_lander_time is not None:
-                t = int(pkt.delivered_to_lander_time)
+            t = getattr(pkt, 'duplicated_time', None)
+            if t is None:
+                t = pkt.delivered_to_lander_time
+            if t is not None:
+                t = int(t)
                 if t < max_time:
                     duplicated_over_time[t] += 1
 
@@ -3120,6 +3186,10 @@ if __name__ == "__main__":
     print('-----------------------------------')
     print(f'Generating Lunar Surface with {num_rovers} rovers with buffer size: {buffer_size}')
     surface = LunarSurface(grd_size, paint_radius, comm_policy)
+    
+    if comm_policy == 2 or comm_policy == 3:
+        surface.plot_buffer_usage_penalty(alpha_values=[buffer_steppness], penalty_drop=penalty_drop, output_path=f'{outputPath}/figures/')
+
 
     if not import_trajectories and traj_type == 1:
         print('-----------------------------------')
@@ -3167,7 +3237,6 @@ if __name__ == "__main__":
     surface.plot_save_results(plot_per_rover=True)
     if comm_policy == 2 or comm_policy == 3:
         surface.save_models(f'{outputPath}/Models/')
-        surface.plot_buffer_usage_penalty(alpha_values=[buffer_steppness], penalty_drop=penalty_drop, output_path=f'{outputPath}/figures/')
 
     print(f'Simulation finished! Elapsed time: {(time.time() - startTime):.2F}s')
 

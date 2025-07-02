@@ -1,0 +1,4 @@
+Method,Delivered,Duplicated,Dropped
+Greedy,3526.0,0.0,718.0
+Spray_and_Wait,2958.0,1151.0,2599.0
+GAT-RL,3592.0,0.0,740.0
